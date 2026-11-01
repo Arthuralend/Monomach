@@ -1,0 +1,97 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ main ]
+    paths-ignore: [ ".github/workflows/craft-web.yml", "tools/**" ]
+  workflow_dispatch:
+  workflow_run:
+    workflows: [ "Build Craft engines (Lexicon, Tabs, Photostore)" ]
+    types: [ completed ]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.11.1"
+
+      - name: Download Craft engines (Lexicon, Tabs, Photostore)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          C=app/src/main/assets/craft
+          mkdir -p $C/lexicon $C/tabs $C/photostore tmpc
+          for e in wordcraft gridcraft photocraft; do
+            gh release download craft-assets -R Arthuralend/WindowsFX -p "$e-web.zip" -D tmpc
+            unzip -q "tmpc/$e-web.zip" -d "tmpc/$e"
+          done
+          cp -R tmpc/wordcraft/*/. $C/lexicon/
+          cp -R tmpc/gridcraft/*/. $C/tabs/
+          cp -R tmpc/photocraft/*/. $C/photostore/
+          ls -la $C/*/index.html
+          du -sh $C/*
+
+      - name: Restore signing key
+        env:
+          WFX_KEYSTORE_BASE64: ${{ secrets.WFX_KEYSTORE_BASE64 }}
+          WFX_STORE_PASSWORD: ${{ secrets.WFX_STORE_PASSWORD }}
+        run: |
+          test -n "$WFX_KEYSTORE_BASE64" && test -n "$WFX_STORE_PASSWORD" || { echo "Configure WFX_KEYSTORE_BASE64 and WFX_STORE_PASSWORD repository secrets before building a signed release."; exit 1; }
+          printf '%s' "$WFX_KEYSTORE_BASE64" | base64 --decode > app/wfx-release.keystore
+          chmod 600 app/wfx-release.keystore
+
+      - name: Build
+        env:
+          WFX_STORE_PASSWORD: ${{ secrets.WFX_STORE_PASSWORD }}
+          WFX_KEY_PASSWORD: ${{ secrets.WFX_KEY_PASSWORD || secrets.WFX_STORE_PASSWORD }}
+          WFX_KEY_ALIAS: ${{ secrets.WFX_KEY_ALIAS || 'windowsfx' }}
+        run: |
+          set -o pipefail
+          gradle :app:assembleRelease --no-daemon --stacktrace 2>&1 | tee build.log
+
+      - name: Publish build log (on failure)
+        if: failure()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ci-logs
+          name: CI logs
+          body: "Logs of failed APK builds."
+          files: build.log
+          prerelease: true
+          make_latest: false
+
+      - name: Rename APK
+        run: |
+          mkdir -p out
+          ls app/build/outputs/apk/release/
+          cp app/build/outputs/apk/release/app-arm64-v8a-release.apk "out/WindowsFX-0.4.${{ github.run_number }}-arm64.apk"
+          cp app/build/outputs/apk/release/app-universal-release.apk "out/WindowsFX-0.4.${{ github.run_number }}-universal.apk"
+          ls -lh out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WindowsFX-apk
+          path: out/*.apk
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: WindowsFX 0.4.${{ github.run_number }}
+          body: "Автоматическая сборка. Для большинства планшетов и телефонов (в том числе Huawei MatePad) скачайте файл -arm64.apk. Файл -universal.apk — для старых 32-битных устройств, эмуляторов и Chromebook."
+          files: out/*.apk
+          make_latest: true
